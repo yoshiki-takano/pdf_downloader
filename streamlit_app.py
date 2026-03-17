@@ -2,7 +2,7 @@ import os
 import re
 import io
 import zipfile
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -18,9 +18,83 @@ def safe_filename(text: str) -> str:
     return out.strip() or "document"
 
 
-def parse_guid_input(raw: str) -> List[str]:
+def parse_text_input(raw: str) -> List[str]:
     items = [line.strip() for line in raw.splitlines()]
     return [x for x in items if x]
+
+
+def _extract_guids_recursive(data: Any, out: List[str]) -> None:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key.upper() == "GUID" and isinstance(value, str) and value.strip():
+                out.append(value.strip())
+            else:
+                _extract_guids_recursive(value, out)
+    elif isinstance(data, list):
+        for item in data:
+            _extract_guids_recursive(item, out)
+
+
+def fetch_guids_from_publication_numbers(
+    api_key: str, publication_numbers: List[str], search_url: str
+) -> Tuple[List[str], List[str]]:
+    headers = {
+        "X-ApiKey": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    if len(publication_numbers) == 1:
+        op = "EQ"
+        value = publication_numbers[0]
+    else:
+        op = "IN"
+        value = ",".join(publication_numbers)
+
+    payload = {
+        "QUERY": {
+            "ALG": "BASIC",
+            "FIELD": "PUBLICATION_NUMBER",
+            "OP": op,
+            "VALUE": value,
+        },
+        "FIELDS": ["GUID", "PUBLICATION_NUMBER", "DWPI_PUBLICATION_NUMBER"],
+        "LIMIT": max(100, len(publication_numbers) * 5),
+        "OFFSET": 0,
+    }
+
+    try:
+        resp = requests.post(search_url, headers=headers, json=payload, timeout=(10, 60))
+    except requests.RequestException as exc:
+        return [], [f"GUID search request error: {exc}"]
+
+    if resp.status_code >= 400:
+        body = (resp.text or "").strip()
+        detail = body[:500] if body else "(empty body)"
+        return [], [f"GUID search failed: status={resp.status_code}, body={detail}"]
+
+    try:
+        result = resp.json()
+    except ValueError:
+        body = (resp.text or "").strip()
+        detail = body[:500] if body else "(empty body)"
+        return [], [f"GUID search returned non-JSON response: {detail}"]
+
+    found: List[str] = []
+    _extract_guids_recursive(result, found)
+
+    deduped: List[str] = []
+    seen = set()
+    for guid in found:
+        if guid not in seen:
+            seen.add(guid)
+            deduped.append(guid)
+
+    logs = [
+        f"Publication numbers input: {len(publication_numbers)}",
+        f"GUID resolved: {len(deduped)}",
+    ]
+    return deduped, logs
 
 
 def fetch_pdf_for_guid(
@@ -98,23 +172,25 @@ def build_zip_bytes(files: List[Tuple[str, bytes]]) -> bytes:
 def main() -> None:
     st.set_page_config(page_title="Clarivate PDF Downloader", page_icon="P", layout="centered")
     st.title("Clarivate PDF Downloader")
-    st.caption("Download PDFs from GUID list and save locally")
+    st.caption("Resolve GUID from PUBLICATION_NUMBER, then download PDFs")
 
     default_api_key = os.environ.get("IP_DATA_API", "").strip()
+    search_url = os.environ.get(
+        "PATENT_SEARCH_API_URL", "https://api.clarivate.com/patents/search"
+    ).strip()
     base_url = os.environ.get(
         "PATENT_PDF_API_URL", "https://api.clarivate.com/patents/document/pdf/"
     ).strip()
 
     with st.form("download_form"):
         api_key = st.text_input("API Key", value=default_api_key, type="password")
-        guid_text = st.text_area(
-            "GUID list (one per line)",
+        publication_text = st.text_area(
+            "PUBLICATION_NUMBER list (one per line)",
             value="\n".join(
                 [
-                    "JP2005135453A_20050526",
-                    "JP07589393B220241125",
-                    "JP2023011735A_20230124",
-                    "WO2021243294A120211202",
+                    "CN114206847B",
+                    "CN110831930B",
+                    "CN114949229A",
                 ]
             ),
             height=180,
@@ -129,14 +205,29 @@ def main() -> None:
         st.error("API Key is empty. Enter it or set IP_DATA_API in your environment.")
         return
 
-    guids = parse_guid_input(guid_text)
-    if not guids:
-        st.error("GUID list is empty. Add at least one GUID.")
+    publication_numbers = parse_text_input(publication_text)
+    if not publication_numbers:
+        st.error("PUBLICATION_NUMBER list is empty. Add at least one value.")
         return
 
-    st.info(f"Targets: {len(guids)}")
+    st.info(f"Publication numbers: {len(publication_numbers)}")
+
+    with st.spinner("Resolving GUIDs from PUBLICATION_NUMBER..."):
+        guids, guid_logs = fetch_guids_from_publication_numbers(
+            api_key.strip(), publication_numbers, search_url
+        )
+
+    if not guids:
+        st.error("No GUID could be resolved from the provided PUBLICATION_NUMBER values.")
+        with st.expander("GUID search logs", expanded=True):
+            for line in guid_logs:
+                st.write(f"[NG] {line}")
+        return
+
+    st.success(f"GUID resolved: {len(guids)}")
 
     success, failed, logs, files = run_download(api_key.strip(), base_url, guids)
+    logs = guid_logs + logs
 
     st.success(f"Completed: success={success}, failed={failed}")
     if files:
