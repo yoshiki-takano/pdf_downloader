@@ -1,7 +1,8 @@
 import os
 import re
-from pathlib import Path
-from typing import List, Tuple
+import io
+import zipfile
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -22,32 +23,39 @@ def parse_guid_input(raw: str) -> List[str]:
     return [x for x in items if x]
 
 
-def download_pdf_for_guid(url: str, headers: dict, guid: str, out_dir: Path) -> Tuple[bool, str]:
+def fetch_pdf_for_guid(
+    url: str, headers: dict, guid: str
+) -> Tuple[bool, str, Optional[bytes], Optional[str]]:
     guid_url = f"{url.rstrip('/')}/{quote(guid, safe='')}"
 
     try:
         resp = requests.get(guid_url, headers=headers, timeout=(10, 120))
     except requests.RequestException as exc:
-        return False, f"{guid}: request error: {exc}"
+        return False, f"{guid}: request error: {exc}", None, None
 
     if resp.status_code >= 400:
         body = (resp.text or "").strip()
         detail = body[:300] if body else "(empty body)"
-        return False, f"{guid}: status={resp.status_code}, body={detail}"
+        return False, f"{guid}: status={resp.status_code}, body={detail}", None, None
 
     content_type = (resp.headers.get("Content-Type") or "").lower()
     if "application/pdf" not in content_type and not resp.content.startswith(b"%PDF"):
         body = (resp.text or "").strip()
         detail = body[:300] if body else "(binary/non-text body)"
-        return False, f"{guid}: non-PDF response, Content-Type={content_type}, body={detail}"
+        return (
+            False,
+            f"{guid}: non-PDF response, Content-Type={content_type}, body={detail}",
+            None,
+            None,
+        )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{safe_filename(guid)}.pdf"
-    out_path.write_bytes(resp.content)
-    return True, f"{guid} -> {out_path}"
+    filename = f"{safe_filename(guid)}.pdf"
+    return True, f"{guid} -> {filename}", resp.content, filename
 
 
-def run_download(api_key: str, base_url: str, guids: List[str], out_dir: Path) -> Tuple[int, int, List[str]]:
+def run_download(
+    api_key: str, base_url: str, guids: List[str]
+) -> Tuple[int, int, List[str], List[Tuple[str, bytes]]]:
     headers = {
         "X-ApiKey": api_key,
         "Content-Type": "application/json",
@@ -57,24 +65,34 @@ def run_download(api_key: str, base_url: str, guids: List[str], out_dir: Path) -
     success_count = 0
     fail_count = 0
     logs: List[str] = []
+    files: List[Tuple[str, bytes]] = []
 
     progress = st.progress(0)
     status = st.empty()
 
     for i, guid in enumerate(guids, start=1):
         status.write(f"Downloading {i}/{len(guids)}: `{guid}`")
-        ok, message = download_pdf_for_guid(base_url, headers, guid, out_dir)
+        ok, message, pdf_bytes, filename = fetch_pdf_for_guid(base_url, headers, guid)
         logs.append(message)
 
-        if ok:
+        if ok and pdf_bytes is not None and filename is not None:
             success_count += 1
+            files.append((filename, pdf_bytes))
         else:
             fail_count += 1
 
         progress.progress(i / len(guids))
 
     status.write("Done")
-    return success_count, fail_count, logs
+    return success_count, fail_count, logs, files
+
+
+def build_zip_bytes(files: List[Tuple[str, bytes]]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename, data in files:
+            zf.writestr(filename, data)
+    return buffer.getvalue()
 
 
 def main() -> None:
@@ -90,7 +108,6 @@ def main() -> None:
             "API URL",
             value="https://api.clarivate.com/patents/document/pdf/",
         )
-        out_dir_text = st.text_input("Output directory", value="pdf_out")
         guid_text = st.text_area(
             "GUID list (one per line)",
             value="\n".join(
@@ -118,13 +135,21 @@ def main() -> None:
         st.error("GUID list is empty. Add at least one GUID.")
         return
 
-    out_dir = Path(out_dir_text).expanduser()
+    st.info(f"Targets: {len(guids)}")
 
-    st.info(f"Targets: {len(guids)} / Output: `{out_dir}`")
-
-    success, failed, logs = run_download(api_key.strip(), base_url.strip(), guids, out_dir)
+    success, failed, logs, files = run_download(api_key.strip(), base_url.strip(), guids)
 
     st.success(f"Completed: success={success}, failed={failed}")
+    if files:
+        zip_data = build_zip_bytes(files)
+        st.download_button(
+            label=f"Download ZIP ({len(files)} files)",
+            data=zip_data,
+            file_name="clarivate_pdfs.zip",
+            mime="application/zip",
+            type="primary",
+        )
+
     with st.expander("Logs", expanded=True):
         for line in logs:
             if "->" in line:
