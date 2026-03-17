@@ -169,6 +169,14 @@ def build_zip_bytes(files: List[Tuple[str, bytes]]) -> bytes:
     return buffer.getvalue()
 
 
+def classify_log_line(line: str) -> str:
+    if "->" in line:
+        return "OK"
+    if line.startswith("Publication numbers input:") or line.startswith("GUID resolved:"):
+        return "INFO"
+    return "NG"
+
+
 def main() -> None:
     st.set_page_config(page_title="Clarivate PDF Downloader", page_icon="P", layout="centered")
     st.title("Clarivate PDF Downloader")
@@ -221,7 +229,8 @@ def main() -> None:
         st.error("No GUID could be resolved from the provided PUBLICATION_NUMBER values.")
         with st.expander("GUID search logs", expanded=True):
             for line in guid_logs:
-                st.write(f"[NG] {line}")
+                status = classify_log_line(line)
+                st.write(f"[{status}] {line}")
         return
 
     st.success(f"GUID resolved: {len(guids)}")
@@ -242,11 +251,10 @@ def main() -> None:
 
     with st.expander("Logs", expanded=True):
         for line in logs:
-            if "->" in line:
-                st.write(f"[OK] {line}")
-            else:
-                st.write(f"[NG] {line}")
+            status = classify_log_line(line)
+            st.write(f"[{status}] {line}")
 
 
 if __name__ == "__main__":
     main()
+    
