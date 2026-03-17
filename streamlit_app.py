@@ -101,13 +101,12 @@ def main() -> None:
     st.caption("Download PDFs from GUID list and save locally")
 
     default_api_key = os.environ.get("IP_DATA_API", "").strip()
+    base_url = os.environ.get(
+        "PATENT_PDF_API_URL", "https://api.clarivate.com/patents/document/pdf/"
+    ).strip()
 
     with st.form("download_form"):
-        api_key = st.text_input("API Key (IP_DATA_API)", value=default_api_key, type="password")
-        base_url = st.text_input(
-            "API URL",
-            value="https://api.clarivate.com/patents/document/pdf/",
-        )
+        api_key = st.text_input("API Key", value=default_api_key, type="password")
         guid_text = st.text_area(
             "GUID list (one per line)",
             value="\n".join(
@@ -137,7 +136,7 @@ def main() -> None:
 
     st.info(f"Targets: {len(guids)}")
 
-    success, failed, logs, files = run_download(api_key.strip(), base_url.strip(), guids)
+    success, failed, logs, files = run_download(api_key.strip(), base_url, guids)
 
     st.success(f"Completed: success={success}, failed={failed}")
     if files:
