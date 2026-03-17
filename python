@@ -1,0 +1,167 @@
+
+# import os
+# import json
+# import sys
+# import requests
+
+# def main():
+#     # --- 設定（環境変数から読み込み。直書きしたい場合は文字列を代入してください） ---
+#     API_KEY = os.environ.get("IP_DATA_API", "")        # 例: "xxxxxxxxxxxxxxxxxxxxxxxx"
+#     url = "https://api.clarivate.com/patents/search"
+
+#     if not API_KEY:
+#         print("ERROR: CLARIVATE_API_KEY が設定されていません。環境変数にセットしてください。", file=sys.stderr)
+#         sys.exit(1)
+
+#     # --- ヘッダー（APIキー必須。必要ならBearerも追加） ---
+#     headers = {
+#         "X-ApiKey": API_KEY,
+#         "Content-Type": "application/json",
+#     }
+
+#     # acc_data =["2013F51294","2008N95044","2019422485","2005370943"] # ["202262719K", "2022593812"] "2005370943","2013M66640"
+#     # acc_data =["2013F51294"] # ["202262719K", "2022593812"] "2005370943","2013M66640"
+#     # acc_data =["2005370943"]
+#     # guid_data = ["JP2005135453A_20050526"] 
+#     # acc_data =["JP04723178B2","CN110831930B","JP07589393B2"]
+#     acc_data = ["CN114206847B","CN110831930B","CN114949229A"]
+
+#     # --- ペイロード（ご提示の条件そのまま） ---
+    
+#     # 正規化：None/空白を除外＆文字列化
+#     cleaned = [str(x).strip() for x in acc_data if x is not None and str(x).strip()]
+#     if not cleaned:
+#         raise ValueError("空のIDリストです。")
+
+#     if len(cleaned) == 1:
+#         # 1件なら EQ
+#         op = "EQ"
+#         value = cleaned[0]           # 単一値
+#     else:
+#         # 2件以上なら IN（カンマ区切り文字列にするのが安定）
+#         op = "IN"
+#         value = ",".join(cleaned)    # ← 重要：配列ではなく文字列
+
+#     payload = {
+#         "QUERY": {
+#             "ALG": "BASIC",
+#             # "FIELD": "DWPI_ACCESSION_NUMBER",
+#             # "FIELD": "GUID",
+#             "FIELD": "PUBLICATION_NUMBER",
+#             "OP": op,
+#             "VALUE": value,
+#             # "VALUE": ",".join(s.strip() for s in map(str, acc_data)) # "1990099416", "2019422485", "2024C72654", #2008N95044
+#             # "VALUE": "JP04723178B2",
+#         },
+#         # "FIELDS": ["GUID", "DWPI_ACCESSION_NUMBER","DWPI_PUBLICATION_NUMBER","DEAD_ALIVE_STATUS","DSI_STRENGTH_INDEX"], 
+#         "FIELDS": ["GUID", "DWPI_ACCESSION_NUMBER", "DWPI_PUBLICATION_NUMBER", "PUBLICATION_DATE", "GRANT_DATE"],#,"DSI_STRENGTH_INDEX"
+#         "LIMIT": 100,
+#         "OFFSET": 0
+#     }
+
+#     try:
+#         # タイムアウトを明示（接続10秒・応答60秒）
+#         resp = requests.post(url, headers=headers, json=payload, timeout=(10, 60))
+#         resp.raise_for_status()  # 4xx/5xx を例外化
+
+#     except requests.exceptions.HTTPError as e:
+#         # サーバからのエラー応答内容も表示
+#         print(f"HTTP Error: {e}", file=sys.stderr)
+#         if e.response is not None:
+#             print(f"Status: {e.response.status_code}", file=sys.stderr)
+#             try:
+#                 print(json.dumps(e.response.json(), ensure_ascii=False, indent=2), file=sys.stderr)
+#             except Exception:
+#                 print(e.response.text, file=sys.stderr)
+#         sys.exit(2)
+
+#     except requests.exceptions.RequestException as e:
+#         # ネットワーク関連エラー（タイムアウト等）
+#         print(f"Request Error: {e}", file=sys.stderr)
+#         sys.exit(3)
+
+#     # --- 成功時処理 ---
+#     try:
+#         result = resp.json()
+#     except ValueError:
+#         print("WARNING: レスポンスが JSON ではありません。生テキストを表示します。\n")
+#         print(resp.text)
+#         sys.exit(0)
+
+#     # 件数・全体を整形表示
+#     count = result.get("result_count", 0)
+#     print(f"Success! Found {count} results\n")
+#     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+# if __name__ == "__main__":
+#     main()
+
+
+
+import os
+import re
+import sys
+import requests
+from urllib.parse import quote
+
+
+def _safe_filename(text: str) -> str:
+    invalid = '<>:"/\\|?*'
+    out = text
+    for ch in invalid:
+        out = out.replace(ch, "_")
+    out = re.sub(r"(?:_?\d{8})$", "", out)
+    return out.strip() or "document"
+
+
+def download_pdf_for_guid(url: str, headers: dict, guid: str, out_dir: str) -> None:
+    guid_url = f"{url.rstrip('/')}/{quote(guid, safe='')}"
+    resp = requests.get(guid_url, headers=headers, timeout=(10, 120))
+
+    if resp.status_code >= 400:
+        print(f"[NG] {guid} status={resp.status_code}", file=sys.stderr)
+        body = resp.text.strip()
+        print(body[:500] if body else "(empty body)", file=sys.stderr)
+        return
+
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "application/pdf" not in content_type and not resp.content.startswith(b"%PDF"):
+        print(f"[NG] {guid} PDFではないレスポンス: Content-Type={content_type}", file=sys.stderr)
+        body = resp.text.strip()
+        print(body[:500] if body else "(binary/non-text body)", file=sys.stderr)
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{_safe_filename(guid)}.pdf")
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
+    print(f"[OK] {guid} -> {out_path}")
+
+
+def main():
+    api_key = os.environ.get("IP_DATA_API", "").strip()
+    url = "https://api.clarivate.com/patents/document/pdf/"
+
+    if not api_key:
+        print("ERROR: IP_DATA_API が設定されていません。環境変数にセットしてください。", file=sys.stderr)
+        sys.exit(1)
+
+    headers = {
+        "X-ApiKey": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/pdf, application/json",
+    }
+
+    guids = [
+        "JP2005135453A_20050526",
+        "JP07589393B220241125",
+        "JP2023011735A_20230124",
+        "WO2021243294A120211202",
+    ]
+
+    out_dir = "pdf_out"
+    for guid in guids:
+        download_pdf_for_guid(url, headers, guid, out_dir)
+
+if __name__ == "__main__":
+    main()
